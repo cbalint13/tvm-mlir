@@ -29,6 +29,7 @@ int main(int argc, char const *argv[]) {
   mlir::PassManager pm(&mlirCtx, mlir::ModuleOp::getOperationName(),
                        mlir::PassManager::Nesting::Implicit);
   pm.addPass(relay::createShapeInference());
+  pm.addPass(relay::createOpFusion());
 
   /// Parse Relay source
   auto fileOrErr = llvm::MemoryBuffer::getFile(inputPath, true);
