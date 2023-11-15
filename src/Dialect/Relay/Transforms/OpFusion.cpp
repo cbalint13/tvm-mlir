@@ -72,37 +72,29 @@ mlir::LogicalResult
 OpFusionPattern::matchAndRewrite(mlir::Operation *root,
                                  mlir::PatternRewriter &rewriter) const {
   // Find out the group
-  if (root->getDialect()->getNamespace() != "relay")
-    return mlir::success();
+  if (root->getDialect()->getNamespace() != RelayDialect::getDialectNamespace())
+    return mlir::failure();
   if (mlir::cast<mlir::func::FuncOp>(root->getParentOp()).getName() != "main")
-    return mlir::success();
+    return mlir::failure();
   auto &group = groups[opGrpIdx.at(root)];
 
   // Only rewrite at outputs
   if (!llvm::is_contained(group.outputs, root))
-    return mlir::success();
+    return mlir::failure();
 
   // Find all arguments of the new function
   mlir::DenseSet<mlir::Operation *> opSet(group.ops.begin(), group.ops.end());
-  std::vector<mlir::Value> args;
+  llvm::SmallVector<mlir::Value> args;
   for (auto op : group.ops)
     for (auto arg : op->getOperands())
       if (!opSet.contains(arg.getDefiningOp()))
         args.push_back(arg);
 
   // Find all results of the new function
-  std::vector<mlir::Value> results;
-  std::vector<std::pair<size_t, size_t>> resultIndices;
-  for (auto outOpZip : llvm::enumerate(group.outputs)) {
-    for (auto resultZip : llvm::enumerate(outOpZip.value()->getResults())) {
-      auto result = resultZip.value();
-      if (llvm::any_of(result.getUsers(), [&](mlir::Operation *op) {
-            return !opSet.contains(op);
-          })) {
-        results.push_back(result);
-        resultIndices.push_back({outOpZip.index(), resultZip.index()});
-      }
-    }
+  llvm::SmallVector<mlir::Value> results;
+  for (auto outOp : group.outputs) {
+    auto opResults = outOp->getResults();
+    results.append(opResults.begin(), opResults.end());
   }
 
   // Create prototype of the function
@@ -123,15 +115,17 @@ OpFusionPattern::matchAndRewrite(mlir::Operation *root,
   for (auto [arg, param] : llvm::zip(args, block->getArguments()))
     mapper.map(arg, param);
   rewriter.setInsertionPointToStart(block);
-  std::vector<mlir::Operation *> funcOutputs;
+  llvm::SmallVector<mlir::Operation *> funcOps;
   for (auto op : group.ops) {
     auto clonedOp = rewriter.clone(*op, mapper);
     if (llvm::is_contained(group.outputs, op))
-      funcOutputs.push_back(clonedOp);
+      funcOps.push_back(clonedOp);
   }
   llvm::SmallVector<mlir::Value> funcResults;
-  for (auto [i, j] : resultIndices)
-    funcResults.push_back(funcOutputs[i]->getResult(j));
+  for (auto outOp : funcOps) {
+    auto opResults = outOp->getResults();
+    funcResults.append(opResults.begin(), opResults.end());
+  }
   rewriter.create<mlir::func::ReturnOp>(root->getLoc(), funcResults);
 
   // Replace group with function call
@@ -140,18 +134,12 @@ OpFusionPattern::matchAndRewrite(mlir::Operation *root,
       root->getLoc(), mlir::FlatSymbolRefAttr::get(func), outTypes, args);
 
   // Replace uses of group outputs
-  auto callResults = funcCall.getResults();
-  auto indexIter = resultIndices.begin();
-  for (auto opZip : llvm::enumerate(group.outputs)) {
-    auto begin = indexIter;
-    while (indexIter->first == opZip.index())
-      ++indexIter;
-    if (begin == indexIter)
-      continue;
-    llvm::SmallVector<mlir::Value> newValues;
-    for (auto [_, j] : llvm::iterator_range(begin, indexIter))
-      newValues.push_back(callResults[j]);
-    rewriter.replaceOp(opZip.value(), newValues);
+  auto resultIter = funcCall.getResults().begin();
+  for (auto op : group.outputs) {
+    llvm::SmallVector<mlir::Value> newValues(resultIter,
+                                             resultIter + op->getNumResults());
+    rewriter.replaceOp(op, newValues);
+    resultIter += op->getNumResults();
   }
 
   return mlir::success();
@@ -217,8 +205,9 @@ void OpFusion::runOnOperation() {
   patterns.add<OpFusionPattern>(ctx, groups, opGrpIdx);
   mlir::FrozenRewritePatternSet frozenPat(std::move(patterns));
   mlir::GreedyRewriteConfig config{.useTopDownTraversal = true};
-  mlir::applyPatternsAndFoldGreedily(mainFn, frozenPat, std::move(config))
-      .succeeded();
+  if (mlir::applyPatternsAndFoldGreedily(mainFn, frozenPat, std::move(config))
+          .failed())
+    mlir::Pass::signalPassFailure();
 }
 
 std::unique_ptr<mlir::Pass> createOpFusion() {

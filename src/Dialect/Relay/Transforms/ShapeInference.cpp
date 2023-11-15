@@ -36,6 +36,7 @@ void ShapeInference::runOnOperation() {
     if (result.failed()) {
       Fatal("Cannot infer type for operator `{0}`.\n",
             op->getName().getStringRef().str().c_str());
+      mlir::Pass::signalPassFailure();
     }
 
     // Assign inferred types to output tensors

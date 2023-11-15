@@ -1,5 +1,5 @@
-#ifndef PASSES_TD
-#define PASSES_TD
+#ifndef RELAY_PASSES_TD
+#define RELAY_PASSES_TD
 
 include "mlir/Pass/PassBase.td"
 

@@ -1,0 +1,11 @@
+add_mlir_conversion_library(mlir_dialect_conversion
+  OBJECT
+    RelayToAffine.cpp
+  DEPENDS
+    mlir_conversion_pass_inc_gen
+  LINK_LIBS
+    PRIVATE
+      mlir_relay_dialect
+    PUBLIC
+      MLIR
+)
