@@ -1,0 +1,7 @@
+#[version = "0.0.5"]
+def @main(%x: Tensor[(1, 2), float32], %w: Tensor[(2, 2), float32], %b: Tensor[(2), float32]) {
+    %0 = nn.dense(%x, %w, units=None);
+    %1 = nn.bias_add(%0, %b, axis=1);
+    %2 = nn.relu(%1);
+    %2
+}
