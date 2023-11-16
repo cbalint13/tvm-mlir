@@ -6,6 +6,8 @@ target_link_libraries(tvm-relay
     mlir_relay_transforms
     mlir_dialect_conversion
   PUBLIC
+    LLVM
     MLIR
+    MLIRExecutionEngine
     tvm::tvm
 )

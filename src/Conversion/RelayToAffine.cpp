@@ -1,3 +1,7 @@
+#include <mlir/Dialect/Affine/IR/AffineOps.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/Transforms/DialectConversion.h>
 
@@ -53,9 +57,9 @@ LowerOp<Op>::matchAndRewrite(Op op, mlir::PatternRewriter &rewriter) const {
               .getInt();
       newResult = func.getArgument(numInputs + retIdx);
     } else {
-      auto alloca = rewriter.create<mlir::memref::AllocaOp>(
+      auto alloc = rewriter.create<mlir::memref::AllocaOp>(
           op.getLoc(), result.getType().template cast<mlir::MemRefType>());
-      newResult = alloca.getResult();
+      newResult = alloc.getResult();
     }
     newResults.push_back(newResult);
   }

@@ -1,6 +1,7 @@
 add_mlir_conversion_library(mlir_dialect_conversion
   OBJECT
     RelayToAffine.cpp
+    AffineToLLVM.cpp
   DEPENDS
     mlir_conversion_pass_inc_gen
   LINK_LIBS
