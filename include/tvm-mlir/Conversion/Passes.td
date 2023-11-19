@@ -10,11 +10,18 @@ def RelayToAffine : Pass<"relay-to-affine", "mlir::ModuleOp"> {
   let constructor = "createRelayToAffine()";
 }
 
-def AffineToLLVM : Pass<"affine-to-llvm", "mlir::ModuleOp"> {
-  let summary = "Lower Affine to LLVM.";
-  let description = [{Lower MLIR Affine dialect to LLVM IR.}];
+def AffineToSCF : Pass<"affine-to-scf", "mlir::ModuleOp"> {
+  let summary = "Lower Affine to SCF.";
+  let description = [{Lower MLIR Affine dialect to SCF dialect.}];
 
-  let constructor = "createAffineToLLVM()";
+  let constructor = "createAffineToSCF()";
+}
+
+def SCFToLLVM : Pass<"scf-to-llvm", "mlir::ModuleOp"> {
+  let summary = "Lower SCF to LLVM.";
+  let description = [{Lower SCF dialect to LLVM IR.}];
+
+  let constructor = "createSCFToLLVM()";
 }
 
 #endif

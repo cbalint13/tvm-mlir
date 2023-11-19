@@ -1,0 +1,9 @@
+add_mlir_library(mlir_transforms
+  OBJECT
+    OptimizeAffine.cpp
+  DEPENDS
+    mlir_transforms_pass_inc_gen
+  LINK_LIBS
+    PUBLIC
+      MLIR
+)

@@ -8,6 +8,7 @@ else()
     add_compile_options(
         -O0
         -g
+        -Wall
         -frtti
         -fexceptions
         -Wno-macro-redefined

@@ -4,10 +4,11 @@
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/Transforms/DialectConversion.h>
+#include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
 #include "tvm-mlir/Conversion/PassDetail.hpp"
+#include "tvm-mlir/Dialect/Relay/RelayDialect.hpp"
 #include "tvm-mlir/Dialect/Relay/RelayOps.hpp"
-#include "tvm-mlir/Support/Common.hpp"
 
 namespace func = mlir::func;
 namespace affine = mlir::affine;
@@ -57,7 +58,7 @@ LowerOp<Op>::matchAndRewrite(Op op, mlir::PatternRewriter &rewriter) const {
               .getInt();
       newResult = func.getArgument(numInputs + retIdx);
     } else {
-      auto alloc = rewriter.create<mlir::memref::AllocaOp>(
+      auto alloc = rewriter.create<mlir::memref::AllocOp>(
           op.getLoc(), result.getType().template cast<mlir::MemRefType>());
       newResult = alloc.getResult();
     }
@@ -71,9 +72,11 @@ LowerOp<Op>::matchAndRewrite(Op op, mlir::PatternRewriter &rewriter) const {
   if (this->lower(op, buffers, &rewriter).failed())
     return mlir::failure();
 
-  // Erase or replace previous operations
+  // Erase or replace previous operation
   if (!isFuncRet)
     rewriter.replaceOp(op, newResults);
+  else
+    rewriter.eraseOp(op);
 
   return mlir::success();
 }
@@ -86,7 +89,7 @@ LowerOp<Op>::matchAndRewrite(Op op, mlir::PatternRewriter &rewriter) const {
     auto iv = iv##Loop.getInductionVar();                                      \
     body                                                                       \
   }                                                                            \
-  rewriter->setInsertionPoint(iv##Loop.getBody()->getTerminator());
+  rewriter->setInsertionPointAfter(iv##Loop);
 
 #define LOAD(buffer, indices)                                                  \
   rewriter->create<affine::AffineLoadOp>(op.getLoc(), buffer, indices)         \
@@ -166,20 +169,25 @@ struct LowerDense : public LowerOp<relay::DenseOp> {
     auto batchSize = dataShape[0], inDim = dataShape[1],
          outDim = weightShape[0];
 
-    FOR(i, 0, batchSize,  // for (i, 0, data.shape[0])
+    /* clang-format off */
+    FOR(i, 0, batchSize, // for (i, 0, data.shape[0])
         FOR(j, 0, outDim, // for (j, 0, weight.shape[0])
-            auto init = F32_CONST(0.f);
-            STORE(init, result, (mlir::ValueRange{i, j})); // result[i, j] = 0
-            FOR(k, 0, inDim, // for (k, 0, data.shape[i])
-                auto D_ik = LOAD(data, (mlir::ValueRange{i, k}));
-                auto W_jk = LOAD(weight, (mlir::ValueRange{j, k}));
-                auto mul = MULF(D_ik, W_jk);
-                auto prev = LOAD(result, (mlir::ValueRange{i, j}));
-                auto add = ADDF(prev, mul);
-                // result[i, j] += data[i, k] * weight[j, k]
-                STORE(add, result, (mlir::ValueRange{i, j}));) // end k
-            )                                                  // end j
-        )                                                      // end i
+            /* clang-format on */
+            auto kLoop = rewriter->create<affine::AffineForOp>(
+                op.getLoc(), 0, inDim, 1, mlir::ValueRange{F32_CONST(0.f)});
+            rewriter->setInsertionPointToStart(kLoop.getBody()); {
+              auto k = kLoop.getInductionVar();
+              auto D_ik = LOAD(data, (mlir::ValueRange{i, k}));
+              auto W_jk = LOAD(weight, (mlir::ValueRange{j, k}));
+              auto mul = MULF(D_ik, W_jk);
+              auto prev = kLoop.getRegionIterArgs()[0];
+              auto add = ADDF(prev, mul);
+              rewriter->create<affine::AffineYieldOp>(op.getLoc(),
+                                                      mlir::ValueRange{add});
+            } rewriter->setInsertionPointAfter(kLoop);
+            STORE(kLoop->getResult(0), result,
+                  (mlir::ValueRange{i, j}));) // end j
+        )                                     // end i
 
     return mlir::success();
   }
@@ -190,8 +198,10 @@ struct LowerCall : public LowerOp<func::CallOp> {
 
   mlir::LogicalResult lower(func::CallOp op, mlir::ValueRange buffers,
                             mlir::PatternRewriter *rewriter) const override {
-    rewriter->create<func::CallOp>(op.getLoc(), op.getCallee(), std::nullopt,
-                                   buffers);
+    rewriter->create<func::CallOp>(
+        op.getLoc(), rewriter->getStringAttr(op.getCallee() + "_lowered"),
+        std::nullopt, buffers);
+
     return mlir::success();
   }
 };
@@ -202,8 +212,6 @@ struct EraseReturnValue : public mlir::OpRewritePattern<func::ReturnOp> {
   mlir::LogicalResult
   matchAndRewrite(func::ReturnOp op,
                   mlir::PatternRewriter &rewriter) const override {
-    for (auto value : op.getOperands())
-      rewriter.eraseOp(value.getDefiningOp());
     rewriter.replaceOpWithNewOp<func::ReturnOp>(op, std::nullopt);
     return mlir::success();
   }
@@ -221,13 +229,17 @@ mlir::LogicalResult
 LowerFunc::matchAndRewrite(func::FuncOp func,
                            mlir::PatternRewriter &rewriter) const {
   // Convert function prototype
-  auto inTypes = llvm::to_vector(
+  auto isMain = func.getName() == "main";
+  auto inBufTypes = llvm::to_vector(
       llvm::map_range(func.getArgumentTypes(), cvtTensorToMemref));
-  inTypes.append(llvm::to_vector(
-      llvm::map_range(func.getResultTypes(), cvtTensorToMemref)));
+  auto outBufTypes = llvm::to_vector(
+      llvm::map_range(func.getResultTypes(), cvtTensorToMemref));
+  auto bufTypes =
+      llvm::to_vector(llvm::concat<mlir::Type>(inBufTypes, outBufTypes));
+  auto newName = isMain ? func.getName() : func.getName() + "_lowered";
   auto newFunc = rewriter.create<func::FuncOp>(
-      func.getLoc(), func.getName(),
-      rewriter.getFunctionType(inTypes, std::nullopt));
+      func.getLoc(), rewriter.getStringAttr(newName),
+      rewriter.getFunctionType(bufTypes, std::nullopt));
   if (func->hasAttrOfType<mlir::BoolAttr>("primitive"))
     newFunc->setAttr("primitive", rewriter.getBoolAttr(true));
   newFunc->setAttr("num_inputs",
@@ -271,9 +283,33 @@ LowerFunc::matchAndRewrite(func::FuncOp func,
       }
     }
   }
-  rewriter.eraseOp(func);
+
+  // Replace original function
+  if (isMain) {
+    rewriter.replaceOp(func, newFunc->getResults());
+  } else {
+    rewriter.setInsertionPointAfter(func);
+    rewriter
+        .create<func::FuncOp>(func.getLoc(), func.getName(),
+                              rewriter.getFunctionType(inBufTypes, outBufTypes))
+        .setPrivate();
+    rewriter.eraseOp(func);
+  }
+
   return mlir::success();
 }
+
+struct EraseDummyFunc : public mlir::OpRewritePattern<func::FuncOp> {
+  explicit EraseDummyFunc(mlir::MLIRContext *ctx) : OpRewritePattern(ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(func::FuncOp func,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (func.getVisibility() == mlir::SymbolTable::Visibility::Private)
+      rewriter.eraseOp(func);
+    return mlir::success();
+  }
+};
 
 class RelayToAffine : public RelayToAffineBase<RelayToAffine> {
   void runOnOperation() override;
@@ -296,16 +332,24 @@ void RelayToAffine::runOnOperation() {
   target.addDynamicallyLegalOp<func::ReturnOp>(
       [](func::ReturnOp op) { return op.getNumOperands() == 0; });
 
-  // Add rewrite patterns
+  // Add rewrite patterns and apply conversion
+  auto mod = getOperation();
   auto ctx = &getContext();
-  mlir::RewritePatternSet patterns(ctx);
-  patterns.add<LowerFunc, LowerReLU, LowerBiasAdd, LowerDense, LowerCall,
-               EraseReturnValue>(ctx);
-
-  // Apply conversion
-  if (mlir::applyPartialConversion(getOperation(), target, std::move(patterns))
-          .failed())
-    mlir::Pass::signalPassFailure();
+  {
+    mlir::RewritePatternSet patterns(ctx);
+    patterns.add<LowerFunc, LowerReLU, LowerBiasAdd, LowerDense, LowerCall,
+                 EraseReturnValue>(ctx);
+    if (applyPartialConversion(mod, target, std::move(patterns)).failed())
+      mlir::Pass::signalPassFailure();
+  }
+  {
+    mlir::RewritePatternSet patterns(ctx);
+    patterns.add<EraseDummyFunc>(ctx);
+    auto funcs = llvm::to_vector(
+        llvm::map_range(mod.getOps(), [](auto &op) { return &op; }));
+    if (applyOpPatternsAndFold(funcs, std::move(patterns)).failed())
+      mlir::Pass::signalPassFailure();
+  }
 }
 
 std::unique_ptr<mlir::Pass> createRelayToAffine() {
